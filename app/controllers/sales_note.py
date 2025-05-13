@@ -1,5 +1,6 @@
 # app/controllers/sales_note.py
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from fastapi import HTTPException
 from datetime import datetime
 import uuid
@@ -29,8 +30,12 @@ class SalesNoteController:
 
     @staticmethod
     def create_sales_note(db: Session, sales_note: SalesNoteCreate):
-        # Verify customer exists
-        customer = db.execute(f"SELECT id FROM customers WHERE id = {sales_note.customer_id}").fetchone()
+        # Verify customer exists - FIXED: Using parameterized query
+        customer = db.execute(
+            text("SELECT id FROM customers WHERE id = :customer_id"),
+            {"customer_id": sales_note.customer_id}
+        ).fetchone()
+
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -52,8 +57,12 @@ class SalesNoteController:
 
         # Create sales note items
         for item in sales_note.items:
-            # Verify product exists
-            product = db.execute(f"SELECT id, price FROM products WHERE id = {item.product_id}").fetchone()
+            # Verify product exists - FIXED: Using parameterized query
+            product = db.execute(
+                text("SELECT id, price FROM products WHERE id = :product_id"),
+                {"product_id": item.product_id}
+            ).fetchone()
+
             if not product:
                 db.rollback()
                 raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} not found")
@@ -97,8 +106,11 @@ class SalesNoteController:
         if db_sales_note.status in ["paid"]:
             raise HTTPException(status_code=400, detail="Cannot delete a paid sales note")
 
-        # Delete sales note items first
-        db.execute(f"DELETE FROM sales_note_items WHERE sales_note_id = {sales_note_id}")
+        # Delete sales note items first - FIXED: Using parameterized query
+        db.execute(
+            text("DELETE FROM sales_note_items WHERE sales_note_id = :sales_note_id"),
+            {"sales_note_id": sales_note_id}
+        )
 
         # Delete sales note
         db.delete(db_sales_note)
