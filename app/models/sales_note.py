@@ -8,7 +8,7 @@ class SalesNote(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     note_number = Column(String, unique=True, nullable=False, index=True)
-    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
+    customer_id = Column(Integer, nullable=False)
     total_amount = Column(Float, nullable=False)
     tax_amount = Column(Float, nullable=False)
     note_date = Column(DateTime, default=func.now(), nullable=False)
@@ -21,8 +21,8 @@ class SalesNoteItem(Base):
     __tablename__ = "sales_note_items"
 
     id = Column(Integer, primary_key=True, index=True)
-    sales_note_id = Column(Integer, ForeignKey("sales_notes.id"), nullable=False)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    sales_note_id = Column(Integer, nullable=False)
+    product_id = Column(Integer, nullable=False)
     quantity = Column(Integer, nullable=False)
     unit_price = Column(Float, nullable=False)
     subtotal = Column(Float, nullable=False)
