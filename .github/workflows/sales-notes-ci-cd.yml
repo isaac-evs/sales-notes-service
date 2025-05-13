@@ -5,33 +5,39 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
+    name: Build Application
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: "3.9"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install flake8 pytest
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
   package:
+    name: Package and Push to ECR
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -47,104 +53,56 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_SALES_NOTES }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          # Full ECR image path
-          echo "Building and pushing to ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-          docker build -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG} .
-          docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
   deploy:
+    name: Deploy to EC2
     needs: package
     runs-on: ubuntu-latest
 
     steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-
       - name: Deploy to EC2
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_SALES_NOTES }}
-          IMAGE_TAG: ${{ github.sha }}
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        run: |
-          # Write the SSH key to a file
-          echo "$EC2_SSH_KEY" > ssh_key.pem
-          chmod 600 ssh_key.pem
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Login to Amazon ECR
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
 
-          # Create deployment script
-          cat > deploy.sh << 'EOL'
-          #!/bin/bash
+            # Pull the latest image
+            docker pull ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY_SALES_NOTES }}:latest
 
-          # Set environment variables
-          ECR_REGISTRY="${ECR_REGISTRY}"
-          ECR_REPOSITORY="${ECR_REPOSITORY}"
-          IMAGE_TAG="${IMAGE_TAG}"
-          CONTAINER_NAME="sales-notes-service"
+            # Stop and remove the existing container if it exists
+            docker stop sales-notes-service || true
+            docker rm sales-notes-service || true
 
-          # Check if env file exists, create if it doesn't
-          if [ ! -f /home/${EC2_USERNAME}/sales-notes-service.env ]; then
-            echo "Creating default environment file"
-            cat > /home/${EC2_USERNAME}/sales-notes-service.env << 'ENV_EOF'
-          DB_HOST=your-rds-endpoint.region.rds.amazonaws.com
-          DB_PORT=5432
-          DB_NAME=shared_service_db
-          DB_USER=admin
-          DB_PASSWORD=your_secure_password
-          API_HOST=0.0.0.0
-          API_PORT=8001
-          PDF_STORAGE_PATH=/tmp/sales_notes_pdfs
-          ENV_EOF
-          fi
+            # Create .env file
+            cat > .env.sales-notes << EOL
+            DB_HOST=${{ secrets.DB_HOST }}
+            DB_PORT=${{ secrets.DB_PORT }}
+            DB_NAME=${{ secrets.DB_NAME }}
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            API_HOST=0.0.0.0
+            API_PORT=8001
+            PDF_STORAGE_PATH=/tmp/sales_notes_pdfs
+            EOL
 
-          # Stop and remove the old container if it exists
-          docker ps -a | grep -q ${CONTAINER_NAME} && docker stop ${CONTAINER_NAME} || true
-          docker ps -a | grep -q ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME} || true
+            # Create directory to store PDFs with appropriate permissions
+            mkdir -p /home/${{ secrets.EC2_USERNAME }}/pdf_storage
 
-          # Pull the new image
-          echo "Pulling ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-          docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+            # Run the new container
+            docker run -d --name sales-notes-service \
+              --restart always \
+              -p 8001:8001 \
+              --env-file .env.sales-notes \
+              -v /home/${{ secrets.EC2_USERNAME }}/pdf_storage:/tmp/sales_notes_pdfs \
+              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY_SALES_NOTES }}:latest
 
-          # Create a volume for PDF storage if it doesn't exist
-          docker volume ls | grep -q sales-notes-pdfs || docker volume create sales-notes-pdfs
-
-          # Run the new container
-          echo "Running new container"
-          docker run -d \
-            --name ${CONTAINER_NAME} \
-            -p 8001:8001 \
-            --restart always \
-            --env-file /home/${EC2_USERNAME}/sales-notes-service.env \
-            -v sales-notes-pdfs:/tmp/sales_notes_pdfs \
-            ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
-
-          echo "Deployment complete"
-          EOL
-
-          # Replace variables in the script
-          sed -i "s|\${ECR_REGISTRY}|$ECR_REGISTRY|g" deploy.sh
-          sed -i "s|\${ECR_REPOSITORY}|$ECR_REPOSITORY|g" deploy.sh
-          sed -i "s|\${IMAGE_TAG}|$IMAGE_TAG|g" deploy.sh
-          sed -i "s|\${EC2_USERNAME}|$EC2_USERNAME|g" deploy.sh
-
-          # Show the deployment script
-          echo "Deployment script:"
-          cat deploy.sh
-
-          # Copy the deployment script to the EC2 instance
-          scp -i ssh_key.pem -o StrictHostKeyChecking=no deploy.sh ${EC2_USERNAME}@${EC2_HOST}:/home/${EC2_USERNAME}/
-
-          # Execute the deployment script
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no ${EC2_USERNAME}@${EC2_HOST} "chmod +x /home/${EC2_USERNAME}/deploy.sh && /home/${EC2_USERNAME}/deploy.sh"
-
-          # Clean up
-          rm ssh_key.pem deploy.sh
+            # Clean up old images
+            docker image prune -af
