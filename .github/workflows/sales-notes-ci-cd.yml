@@ -47,8 +47,10 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_SALES_NOTES }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          # Full ECR image path
+          echo "Building and pushing to ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          docker build -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG} .
+          docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
 
   deploy:
     needs: package
@@ -79,40 +81,64 @@ jobs:
           echo "$EC2_SSH_KEY" > ssh_key.pem
           chmod 600 ssh_key.pem
 
-          # Define the variables directly in the deployment script to avoid variable substitution issues
-          REGISTRY=$ECR_REGISTRY
-          REPO=$ECR_REPOSITORY
-          TAG=$IMAGE_TAG
-
-          # Create deployment script that properly handles variables
-          cat > deploy.sh << EOF
+          # Create deployment script
+          cat > deploy.sh << 'EOL'
           #!/bin/bash
 
-          # Stop and remove the old container if it exists
-          docker stop sales-notes-service || true
-          docker rm sales-notes-service || true
+          # Set environment variables
+          ECR_REGISTRY="${ECR_REGISTRY}"
+          ECR_REPOSITORY="${ECR_REPOSITORY}"
+          IMAGE_TAG="${IMAGE_TAG}"
+          CONTAINER_NAME="sales-notes-service"
 
-          # Pull the new image
-          docker pull ${REGISTRY}/${REPO}:${TAG}
-
-          # Create a volume for PDF storage
-          docker volume create sales-notes-pdfs || true
-
-          # Ensure environment file exists
-          if [ ! -f /home/$EC2_USERNAME/sales-notes-service.env ]; then
-            echo "Creating empty environment file"
-            touch /home/$EC2_USERNAME/sales-notes-service.env
+          # Check if env file exists, create if it doesn't
+          if [ ! -f /home/${EC2_USERNAME}/sales-notes-service.env ]; then
+            echo "Creating default environment file"
+            cat > /home/${EC2_USERNAME}/sales-notes-service.env << 'ENV_EOF'
+          DB_HOST=your-rds-endpoint.region.rds.amazonaws.com
+          DB_PORT=5432
+          DB_NAME=shared_service_db
+          DB_USER=admin
+          DB_PASSWORD=your_secure_password
+          API_HOST=0.0.0.0
+          API_PORT=8001
+          PDF_STORAGE_PATH=/tmp/sales_notes_pdfs
+          ENV_EOF
           fi
 
+          # Stop and remove the old container if it exists
+          docker ps -a | grep -q ${CONTAINER_NAME} && docker stop ${CONTAINER_NAME} || true
+          docker ps -a | grep -q ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME} || true
+
+          # Pull the new image
+          echo "Pulling ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+
+          # Create a volume for PDF storage if it doesn't exist
+          docker volume ls | grep -q sales-notes-pdfs || docker volume create sales-notes-pdfs
+
           # Run the new container
-          docker run -d \\
-            --name sales-notes-service \\
-            -p 8001:8001 \\
-            --restart always \\
-            --env-file /home/$EC2_USERNAME/sales-notes-service.env \\
-            -v sales-notes-pdfs:/tmp/sales_notes_pdfs \\
-            ${REGISTRY}/${REPO}:${TAG}
-          EOF
+          echo "Running new container"
+          docker run -d \
+            --name ${CONTAINER_NAME} \
+            -p 8001:8001 \
+            --restart always \
+            --env-file /home/${EC2_USERNAME}/sales-notes-service.env \
+            -v sales-notes-pdfs:/tmp/sales_notes_pdfs \
+            ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+
+          echo "Deployment complete"
+          EOL
+
+          # Replace variables in the script
+          sed -i "s|\${ECR_REGISTRY}|$ECR_REGISTRY|g" deploy.sh
+          sed -i "s|\${ECR_REPOSITORY}|$ECR_REPOSITORY|g" deploy.sh
+          sed -i "s|\${IMAGE_TAG}|$IMAGE_TAG|g" deploy.sh
+          sed -i "s|\${EC2_USERNAME}|$EC2_USERNAME|g" deploy.sh
+
+          # Show the deployment script
+          echo "Deployment script:"
+          cat deploy.sh
 
           # Copy the deployment script to the EC2 instance
           scp -i ssh_key.pem -o StrictHostKeyChecking=no deploy.sh ${EC2_USERNAME}@${EC2_HOST}:/home/${EC2_USERNAME}/
