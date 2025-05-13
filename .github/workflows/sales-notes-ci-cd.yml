@@ -90,7 +90,6 @@ jobs:
             DB_PASSWORD=${{ secrets.DB_PASSWORD }}
             API_HOST=0.0.0.0
             API_PORT=8001
-            ENVIRONMENT=production
             PDF_STORAGE_PATH=/tmp/sales_notes_pdfs
             EOL
 
